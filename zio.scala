@@ -53,7 +53,7 @@ object CacheImpl:
 
   def fileLayer[K: Tag, V: Tag] = ZLayer.fromFunction(file[K, V])
 
-case class User(id: String, email: String, passwordHash: String)
+case class User(email: String, passwordHash: String)
 
 trait UserRepository:
   def createUser(email: String, passwordHash: String): Task[User]

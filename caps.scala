@@ -1,11 +1,15 @@
 package example.caps
 
 import scala.annotation.capability
-import example.tf.Trace
 
 // base capabilities
 
-@capability trait Async
+@capability trait Async:
+  def suspend[A](block: => A): A // dummy
+
+object Async:
+  given Async = new Async:
+    def suspend[A](block: => A): A = block // dummy
 
 @capability trait FileSystem:
   def read(path: String): String
@@ -54,7 +58,7 @@ class FileCache[K, V](using fs: FileSystem) extends Cache[K, V]:
   private def serialize(value: V): String = ???
   private def deserialize(content: String): Option[V] = ???
 
-case class User(id: String, email: String, passwordHash: String)
+case class User(email: String, passwordHash: String)
 
 // our trait is generic in capabilities
 trait UserRepository[C]:
@@ -71,6 +75,26 @@ class UserRepositoryImpl extends UserRepository[Trace]:
     summon[Trace].span("getUserFromDb") {
       ???
     }
+
+// alternative encoding with context functions
+trait CtxUserRepository[F[_]]:
+  def createUser(email: String, passwordHash: String): F[User]
+  def getUser(email: String): F[User]
+
+class CtxUserRepositoryImpl extends CtxUserRepository[CtxUserRepositoryImpl.Eff]:
+  import CtxUserRepositoryImpl.Eff
+
+  def createUser(email: String, passwordHash: String): Eff[User] =
+    summon[Trace].span("createUserInDb") {
+      ???
+    }
+  def getUser(email: String): Eff[User] =
+    summon[Trace].span("getUserFromDb") {
+      ???
+    }
+
+object CtxUserRepositoryImpl:
+  type Eff[A] = Trace ?=> Either[Throwable, A]
 
 // Business services
 
@@ -97,8 +121,43 @@ class UserHttpServiceImpl(userRepo: UserRepository[Trace], cache: Cache[String, 
 
           if user.passwordHash == pwdHash then Right(user)
           else Left(Exception("Invalid password"))
-
     }
+
+// alternative encoding with context functions
+
+trait CtxUserHttpService[F[_]]:
+  def createUser(email: String, password: String): F[Unit]
+  def authenticate(email: String, password: String): F[User]
+
+import CtxUserHttpServiceImpl.Eff
+import CtxUserRepositoryImpl.{Eff => CtxUserRepositoryEff}
+
+class CtxUserHttpServiceImpl(userRepo: CtxUserRepository[CtxUserRepositoryEff], cache: Cache[String, User], hash: Hash)
+    extends CtxUserHttpService[Eff]:
+
+  def createUser(email: String, password: String): Eff[Unit] =
+    summon[Trace].span("createUser") {
+      userRepo.createUser(email, password) match
+        case Left(ex)    => Left(ex)
+        case Right(user) => cache.put(user.email, user)
+
+      Right(())
+    }
+
+  def authenticate(email: String, password: String): Eff[User] =
+    summon[Trace].span("authenticate") {
+      cache
+        .get(email)
+        .fold(userRepo.getUser(email))(Right(_))
+        .flatMap: user =>
+          val pwdHash = hash.hash(password)
+
+          if user.passwordHash == pwdHash then Right(user)
+          else Left(Exception("Invalid password"))
+    }
+
+object CtxUserHttpServiceImpl:
+  type Eff[A] = Trace ?=> Async ?=> Either[Throwable, A]
 
 @main def main =
   val userRepo: UserRepository[Trace] = UserRepositoryImpl()
@@ -106,6 +165,19 @@ class UserHttpServiceImpl(userRepo: UserRepository[Trace], cache: Cache[String, 
   val hash: Hash = HashImpl()
 
   val userHttpService = UserHttpServiceImpl(userRepo, cache, hash)
+  locally:
+    // No given instance of type example.caps.Trace & example.caps.Async was found for parameter x$3 of method createUser in class UserHttpServiceImpl
+    // without this:
+    type Ctx = Trace & Async
+    given Ctx = new Trace with Async:
+      def span[A](name: String)(block: => A): A = Trace.given_Trace.span(name)(block)
+      def suspend[A](block: => A): A = Async.given_Async.suspend(block)
 
-  // No given instance of type example.caps.Trace & example.caps.Async was found for parameter x$3 of method createUser in class UserHttpServiceImpl
-  userHttpService.createUser("lukasz", "mypasswd23")
+      userHttpService.createUser("lukasz", "mypasswd23")
+
+  val ctxUserRepo = CtxUserRepositoryImpl()
+  val ctxUserHttpService = CtxUserHttpServiceImpl(ctxUserRepo, cache, hash)
+  locally:
+    // this takes givens from companion objects which may be more convenient
+    // but also quite confusing when there are multiple instances
+    ctxUserHttpService.createUser("lukasz", "myPasswd23")

@@ -77,7 +77,7 @@ object Cache:
         private def serialize(value: V): String = ???
         private def deserialize(value: String): Option[V] = ???
 
-case class User(id: String, email: String, passwordHash: String)
+case class User(email: String, passwordHash: String)
 
 trait UserRepository[F[_]]:
   def createUser(email: String, passwordHash: String): F[User]
